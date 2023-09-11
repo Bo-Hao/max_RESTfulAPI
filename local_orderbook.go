@@ -4,14 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"github.com/shopspring/decimal"
 	"strings"
 	"sync"
 	"time"
 
-	mapbook "github.com/Bo-Hao/syncmapbook"
 	"github.com/gorilla/websocket"
 	"github.com/sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
 type OrderbookBranch struct {
@@ -24,30 +24,31 @@ type OrderbookBranch struct {
 		onErr bool
 		sync.RWMutex
 	}
+	keeper OrderBookKeeper
+
 	Market string
 
-	bids                       mapbook.BidBook
-	asks                       mapbook.AskBook
 	lastUpdatedTimestampBranch struct {
 		timestamp int64
 		sync.RWMutex
 	}
+
+	logger *log.Logger
 }
 
 type bookstruct struct {
-	Channcel  string     `json:"c,omitempty"`
-	Event     string     `json:"e,omitempty"`
-	Market    string     `json:"M,omitempty"`
-	Asks      [][]string `json:"a,omitempty"`
-	Bids      [][]string `json:"b,omitempty"`
-	Timestamp int64      `json:"T,omitempty"`
+	Channcel  string              `json:"c,omitempty"`
+	Event     string              `json:"e,omitempty"`
+	Market    string              `json:"M,omitempty"`
+	Asks      [][]decimal.Decimal `json:"a,omitempty"`
+	Bids      [][]decimal.Decimal `json:"b,omitempty"`
+	Timestamp int64               `json:"T,omitempty"`
 }
 
 func SpotLocalOrderbook(ctx context.Context, symbol string, logger *logrus.Logger) *OrderbookBranch {
 	var o OrderbookBranch
 	o.Market = strings.ToLower(symbol)
-	o.asks = *mapbook.NewAskBook()
-	o.bids = *mapbook.NewBidBook()
+	o.logger = logger
 
 	go o.maintain(ctx, symbol)
 
@@ -147,7 +148,7 @@ func maxSubscribeBookMessage(symbol string) ([]byte, error) {
 	subscriptions := make(map[string]interface{})
 	subscriptions["channel"] = "book"
 	subscriptions["market"] = strings.ToLower(symbol)
-	subscriptions["depth"] = 10
+	subscriptions["depth"] = 50
 	args = append(args, subscriptions)
 
 	param["subscriptions"] = args
@@ -224,8 +225,7 @@ func (o *OrderbookBranch) parseOrderbookUpdateMsg(msgMap map[string]interface{})
 	}
 
 	// update
-	o.asks.Update(book.Asks)
-	o.bids.Update(book.Bids)
+	o.keeper.handleUpdate(book.Bids, book.Asks)
 
 	return nil
 }
@@ -246,9 +246,11 @@ func (o *OrderbookBranch) parseOrderbookSnapshotMsg(msgMap map[string]interface{
 	if book.Market != o.Market {
 		return errors.New("wrong market")
 	}
-
-	o.asks.Snapshot(book.Asks)
-	o.bids.Snapshot(book.Bids)
+	fmt.Println(book.Bids)
+	// snapshot
+	if err := o.keeper.handleSnapshot(book.Bids, book.Asks); err != nil {
+		return err
+	}
 
 	o.lastUpdatedTimestampBranch.Lock()
 	defer o.lastUpdatedTimestampBranch.Unlock()
@@ -275,14 +277,6 @@ func (o *OrderbookBranch) setConn(conn *websocket.Conn) {
 	o.connBranch.conn = conn
 }
 
-func (o *OrderbookBranch) GetBids() ([][]string, bool) {
-	return o.bids.GetAll()
-}
-
-func (o *OrderbookBranch) GetAsks() ([][]string, bool) {
-	return o.asks.GetAll()
-}
-
 func (o *OrderbookBranch) Close() {
 	o.connBranch.Lock()
 	defer o.connBranch.Unlock()
@@ -293,4 +287,8 @@ func (o *OrderbookBranch) wsWriteMsg(msgType int, data []byte) {
 	o.connBranch.Lock()
 	defer o.connBranch.Unlock()
 	o.connBranch.conn.WriteMessage(msgType, data)
+}
+
+func (o *OrderbookBranch) RefreshOrderBook() error {
+	return nil
 }
